@@ -1,7 +1,7 @@
 // ===============================================================
 // !! 중요 !!
 // SAM 배포 후 출력되는 API Gateway의 엔드포인트 URL을 여기에 붙여넣으세요.
-const API_ENDPOINT = "https://avrc1zot79.execute-api.ap-northeast-2.amazonaws.com"; 
+const API_ENDPOINT = "https://febt9k9yo0.execute-api.ap-northeast-2.amazonaws.com"; 
 // ===============================================================
 
 const fileInput = document.getElementById('file-input');
