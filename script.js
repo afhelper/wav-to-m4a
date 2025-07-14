@@ -128,12 +128,16 @@ async function handleFile(file) {
 
 function uploadToS3(url, file) {
     return new Promise((resolve, reject) => {
+        const logWithTimestamp = (message, ...data) => {
+            const timestamp = new Date().toISOString();
+            console.log(`[${timestamp}] ${message}`, ...data);
+        };
+
         const xhr = new XMLHttpRequest();
         xhr.open('PUT', url, true);
         xhr.setRequestHeader('Content-Type', 'audio/wav');
 
-        // Detailed logging
-        console.log('S3 Upload Request:', {
+        logWithTimestamp('S3 Upload Request:', {
             url: url,
             method: 'PUT',
             headers: { 'Content-Type': 'audio/wav' }
@@ -143,20 +147,19 @@ function uploadToS3(url, file) {
             if (event.lengthComputable) {
                 const percentComplete = (event.loaded / event.total) * 100;
                 progressBar.style.width = `${20 + (percentComplete * 0.4)}%`;
-                console.log(`Upload progress: ${percentComplete.toFixed(2)}%`);
             }
         };
 
-        xhr.onloadstart = () => console.log('Upload started.');
-        xhr.onloadend = () => console.log('Upload finished.');
+        xhr.onloadstart = () => logWithTimestamp('Upload started.');
+        xhr.onloadend = () => logWithTimestamp('Upload finished.');
         
         xhr.onreadystatechange = () => {
-            console.log(`XHR state changed: ${xhr.readyState}`);
+            logWithTimestamp(`XHR state changed: ${xhr.readyState}`);
             if (xhr.readyState === 4) {
-                 console.log('XHR Response:', {
+                 logWithTimestamp('XHR Response:', {
                     status: xhr.status,
                     statusText: xhr.statusText,
-                    responseText: xhr.responseText,
+                    response: xhr.response,
                     headers: xhr.getAllResponseHeaders()
                 });
             }
@@ -164,21 +167,21 @@ function uploadToS3(url, file) {
 
         xhr.onload = () => {
             if (xhr.status === 200) {
-                console.log('S3 upload successful.');
+                logWithTimestamp('S3 upload successful.');
                 resolve();
             } else {
-                console.error(`S3 upload failed with status: ${xhr.status} ${xhr.statusText}`);
+                logWithTimestamp(`S3 upload failed with status: ${xhr.status} ${xhr.statusText}`, 'error');
                 reject(new Error(`S3 업로드 실패: ${xhr.statusText}`));
             }
         };
 
         xhr.onerror = () => {
-            console.error('S3 upload failed due to a network error.');
+            logWithTimestamp('S3 upload failed due to a network error.', 'error');
             reject(new Error('네트워크 오류로 S3 업로드에 실패했습니다.'));
         };
         
-        xhr.onabort = () => console.warn('S3 upload aborted.');
-        xhr.ontimeout = () => console.error('S3 upload timed out.');
+        xhr.onabort = () => logWithTimestamp('S3 upload aborted.', 'warn');
+        xhr.ontimeout = () => logWithTimestamp('S3 upload timed out.', 'error');
 
         xhr.send(file);
     });
