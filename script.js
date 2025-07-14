@@ -16,8 +16,8 @@ const statusText = document.getElementById('status-text');
 const downloadLink = document.getElementById('download-link');
 const resetButton = document.getElementById('reset-button');
 
-// This will be updated after deployment
-let BUCKET_NAME = "wav-to-mp3-audiobucket-ba3dbypsrebb";
+// These will be updated after deployment from the outputs
+let BUCKET_URL = ""; 
 const REGION = "ap-northeast-2";
 
 
@@ -67,6 +67,12 @@ async function handleFile(file) {
         alert('WAV 파일만 업로드할 수 있습니다.');
         return;
     }
+    
+    const MAX_SIZE_MB = 55;
+    if (file.size > MAX_SIZE_MB * 1024 * 1024) {
+        alert(`파일 크기는 ${MAX_SIZE_MB}MB를 초과할 수 없습니다.`);
+        return;
+    }
 
     // UI 초기화
     uploadArea.classList.add('hidden');
@@ -81,29 +87,45 @@ async function handleFile(file) {
     statusText.classList.add('text-blue-600');
 
     try {
-        // 1. API Gateway를 통해 S3로 직접 파일 업로드
-        statusText.textContent = '파일 업로드 중...';
+        // 1. 백엔드에 Presigned POST URL 요청
+        statusText.textContent = '업로드 주소 요청 중...';
         progressBar.style.width = '10%';
         
-        const uploadUrl = `${API_ENDPOINT}/uploads/${encodeURIComponent(file.name)}`;
+        const presignedResponse = await fetch(`${API_ENDPOINT}/create-presigned-post`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                fileName: file.name,
+                contentType: file.type
+            })
+        });
 
-        await uploadDirectlyToApiGateway(uploadUrl, file);
-        
+        if (!presignedResponse.ok) {
+            const errorData = await presignedResponse.json();
+            throw new Error(errorData.detail || `API 서버 오류: ${presignedResponse.statusText}`);
+        }
+        const presignedData = await presignedResponse.json();
+        BUCKET_URL = presignedData.url; // Save the bucket URL for later
+        progressBar.style.width = '20%';
+
+        // 2. S3로 파일 업로드 (Presigned POST 사용)
+        statusText.textContent = '파일 업로드 중...';
+        await uploadToS3WithPresignedPost(presignedData, file);
         progressBar.style.width = '60%';
 
-        // 2. 변환 대기
+        // 3. 변환 대기
         statusText.textContent = '서버에서 변환 중... (파일 크기에 따라 시간이 걸릴 수 있습니다)';
         await new Promise(resolve => setTimeout(resolve, 10000)); // 변환 시간 대기 (10초)
         progressBar.style.width = '100%';
         statusText.textContent = '변환 완료!';
 
-        // 3. 결과 표시
+        // 4. 결과 표시
         const baseName = file.name.substring(0, file.name.lastIndexOf('.'));
         const m4aFileName = `${baseName}.m4a`;
         
-        // 다운로드 URL 생성
-        const downloadUrl = `https://${BUCKET_NAME}.s3.${REGION}.amazonaws.com/converted/${encodeURIComponent(m4aFileName)}`;
-
+        // 다운로드 URL 생성 (S3 버킷 URL + 변환된 파일 키)
+        const downloadUrl = `${BUCKET_URL}/converted/${encodeURIComponent(m4aFileName)}`;
+        
         downloadLink.href = downloadUrl;
         downloadLink.setAttribute('download', m4aFileName);
         
@@ -119,32 +141,53 @@ async function handleFile(file) {
     }
 }
 
-function uploadDirectlyToApiGateway(url, file) {
+function uploadToS3WithPresignedPost(presignedData, file) {
     return new Promise((resolve, reject) => {
+        const formData = new FormData();
+        // S3에서 요구하는 필드들을 FormData에 추가
+        Object.keys(presignedData.fields).forEach(key => {
+            formData.append(key, presignedData.fields[key]);
+        });
+        // 실제 파일 데이터는 마지막에 추가
+        formData.append('file', file);
+
         const xhr = new XMLHttpRequest();
-        xhr.open('POST', url, true);
-        xhr.setRequestHeader('Content-Type', 'audio/wav');
+        xhr.open('POST', presignedData.url, true);
 
         xhr.upload.onprogress = (event) => {
             if (event.lengthComputable) {
                 const percentComplete = (event.loaded / event.total);
-                progressBar.style.width = `${10 + (percentComplete * 50)}%`; // 10% -> 60%
+                // 전체 진행률의 20% ~ 60% 구간을 업로드 진행률로 표시
+                progressBar.style.width = `${20 + (percentComplete * 40)}%`;
             }
         };
 
         xhr.onload = () => {
-            if (xhr.status >= 200 && xhr.status < 300) {
+            // S3는 성공 시 204 No Content 또는 200 OK를 반환할 수 있음
+            if (xhr.status === 204 || xhr.status === 200) {
                 resolve();
             } else {
-                console.error('API Gateway Upload Error Response:', xhr.responseText);
-                reject(new Error(`업로드 실패: ${xhr.statusText} (서버 응답: ${xhr.responseText})`));
+                console.error('S3 Upload Error Response:', xhr.responseText);
+                // XML 응답에서 에러 메시지 파싱 시도
+                let errorMessage = `S3 업로드 실패: ${xhr.statusText}`;
+                try {
+                    const parser = new DOMParser();
+                    const xmlDoc = parser.parseFromString(xhr.responseText, "text/xml");
+                    const messageNode = xmlDoc.getElementsByTagName("Message")[0];
+                    if (messageNode) {
+                        errorMessage = messageNode.childNodes[0].nodeValue;
+                    }
+                } catch (e) {
+                    // 파싱 실패 시 원래 메시지 사용
+                }
+                reject(new Error(errorMessage));
             }
         };
 
         xhr.onerror = () => {
-            reject(new Error('네트워크 오류로 업로드에 실패했습니다.'));
+            reject(new Error('네트워크 오류로 S3 업로드에 실패했습니다.'));
         };
 
-        xhr.send(file);
+        xhr.send(formData);
     });
 }
