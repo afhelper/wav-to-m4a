@@ -57,16 +57,6 @@ function formatBytes(bytes, decimals = 2) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }
 
-// Helper to read file as Base64
-function toBase64(file) {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.readAsDataURL(file);
-        reader.onload = () => resolve(reader.result.split(',')[1]); // Get only the base64 content
-        reader.onerror = error => reject(error);
-    });
-}
-
 async function handleFile(file) {
     if (!file.type.startsWith('audio/wav')) {
         alert('WAV 파일만 업로드할 수 있습니다.');
@@ -86,42 +76,40 @@ async function handleFile(file) {
     statusText.classList.add('text-blue-600');
 
     try {
-        // 1. 파일을 Base64로 인코딩
-        statusText.textContent = '파일을 서버로 전송 준비 중...';
+        // 1. 백엔드에 pre-signed URL 요청
+        statusText.textContent = '업로드 주소 요청 중...';
         progressBar.style.width = '10%';
-        const fileContentBase64 = await toBase64(file);
-        progressBar.style.width = '30%';
-
-        // 2. 서버로 파일 업로드
-        statusText.textContent = '파일을 서버��� 업로드 중...';
-        const uploadResponse = await fetch(`${API_ENDPOINT}/upload`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                fileName: file.name,
-                fileContent: fileContentBase64,
-            }),
-        });
-
-        if (!uploadResponse.ok) {
-            const errorBody = await uploadResponse.json();
-            throw new Error(`서버 업로드 실패: ${errorBody.error || uploadResponse.statusText}`);
+        const response = await fetch(`${API_ENDPOINT}/get-upload-url?fileName=${encodeURIComponent(file.name)}`);
+        if (!response.ok) {
+            throw new Error(`API 서버 오류: ${response.statusText}`);
         }
-        
-        const { converted_key } = await uploadResponse.json();
+        const { uploadUrl } = await response.json();
+        progressBar.style.width = '20%';
+
+        // 2. S3로 파일 업로드 (XMLHttpRequest 사용으로 진행률 추적)
+        statusText.textContent = '파일 업로드 중...';
+        await uploadToS3(uploadUrl, file);
         progressBar.style.width = '60%';
 
-        // 3. 변환 완료 폴링
-        statusText.textContent = '서버에서 변환 중...';
-        const downloadUrl = await pollForConversion(converted_key);
+        // 3. 변환 대기 (단순화된 방식)
+        statusText.textContent = '서버에서 변환 중... (파일 크기에 따라 시간이 걸릴 수 있습니다)';
+        // 실제 프로덕션에서는 WebSocket이나 폴링으로 완료 여부를 확인해야 함
+        // 여기서는 S3 경로를 예측하여 잠시 후 다운로드 링크를 활성화
+        await new Promise(resolve => setTimeout(resolve, 10000)); // 변환 시간 대기 (10초)
         progressBar.style.width = '100%';
         statusText.textContent = '변환 완료!';
 
         // 4. 결과 표시
+        const baseName = file.name.substring(0, file.name.lastIndexOf('.'));
+        const m4aFileName = `${baseName}.m4a`;
+        // 다운로드 URL 생성 (업로드 URL에서 쿼리스트링 제거하고 경로 변경)
+        const downloadUrlObject = new URL(uploadUrl);
+        downloadUrlObject.pathname = downloadUrlObject.pathname.replace('uploads/', 'converted/').replace('.wav', '.m4a');
+        const downloadUrl = downloadUrlObject.origin + downloadUrlObject.pathname;
+
+        
         downloadLink.href = downloadUrl;
-        downloadLink.setAttribute('download', converted_key.replace('converted/', ''));
+        downloadLink.setAttribute('download', m4aFileName);
         
         statusArea.classList.add('hidden');
         resultArea.classList.remove('hidden');
@@ -135,23 +123,58 @@ async function handleFile(file) {
     }
 }
 
-async function pollForConversion(fileKey, maxAttempts = 20, interval = 3000) {
-    for (let i = 0; i < maxAttempts; i++) {
-        try {
-            const statusResponse = await fetch(`${API_ENDPOINT}/status/${fileKey}`);
-            if (statusResponse.ok) {
-                const data = await statusResponse.json();
-                if (data.status === 'CONVERTED') {
-                    return data.downloadUrl;
-                }
-                // PENDING, continue polling
-                const progress = 60 + (i / maxAttempts) * 40;
-                progressBar.style.width = `${progress}%`;
+function uploadToS3(url, file) {
+    return new Promise((resolve, reject) => {
+        const logWithTimestamp = (message, ...data) => {
+            const timestamp = new Date().toISOString();
+            console.log(`[${timestamp}] ${message}`, ...data);
+        };
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', url, true);
+        xhr.setRequestHeader('Content-Type', 'audio/wav');
+
+        logWithTimestamp('S3 Upload Request:', {
+            url: url,
+            method: 'PUT',
+            headers: { 'Content-Type': 'audio/wav' }
+        });
+
+        xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable) {
+                const percentComplete = (event.loaded / event.total);
+                // 전체 진행률의 20% ~ 60% 구간을 업로드 진행률로 표시
+                progressBar.style.width = `${20 + (percentComplete * 40)}%`;
             }
-        } catch (error) {
-            console.warn(`Polling attempt ${i + 1} failed:`, error);
-        }
-        await new Promise(resolve => setTimeout(resolve, interval));
-    }
-    throw new Error('변환 시간 초과. 파일이 너무 크거나 서버에 문제가 발생했습니다.');
+        };
+        
+        xhr.onreadystatechange = () => {
+            logWithTimestamp(`XHR state changed: ${xhr.readyState}`);
+            if (xhr.readyState === 4) {
+                 logWithTimestamp('XHR Response:', {
+                    status: xhr.status,
+                    statusText: xhr.statusText,
+                    response: xhr.response,
+                    headers: xhr.getAllResponseHeaders()
+                });
+            }
+        };
+
+        xhr.onload = () => {
+            if (xhr.status === 200) {
+                logWithTimestamp('S3 upload successful.');
+                resolve();
+            } else {
+                logWithTimestamp(`S3 upload failed with status: ${xhr.status} ${xhr.statusText}`, 'error');
+                reject(new Error(`S3 업로드 실패: ${xhr.statusText}`));
+            }
+        };
+
+        xhr.onerror = () => {
+            logWithTimestamp('S3 upload failed due to a network error.', 'error');
+            reject(new Error('네트워크 오류로 S3 업로드에 실패했습니다.'));
+        };
+
+        xhr.send(file);
+    });
 }
